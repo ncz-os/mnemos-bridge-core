@@ -71,8 +71,15 @@ explicit_api_key = AuthResolver.resolve(api_key="mnemos_sk_test")
 `resolve_mcp_token()` looks up an explicit token and then `MNEMOS_MCP_TOKEN`.
 For a per-user `MNEMOS_MCP_TOKENS` mapping, pass the selected MCP token explicitly.
 `resolve()` remains the backend API-key resolver; its lookup order is explicit
-argument, `MNEMOS_API_KEY`, `~/.mnemos/config.toml`, then
-`~/.api_keys_master.json` at `mnemos.bridge.api_key`.
+argument, `MNEMOS_API_KEY`, `~/.mnemos/config.toml`, then the opt-in JSON key
+store named by `MNEMOS_BRIDGE_KEYS_FILE` (read at `mnemos.bridge.api_key`).
+
+Key-bearing files must be private to the owner. `~/.mnemos/config.toml` and any
+`MNEMOS_BRIDGE_KEYS_FILE` whose mode has any group or world bit set
+(`mode & 0o077`) are refused with an error that names the file and the remedy
+(`chmod 600 <file>`), matching how `mnemosctl` treats key files. No key store
+outside `~/.mnemos/config.toml` is read unless `MNEMOS_BRIDGE_KEYS_FILE` points
+at it, so host-specific key layouts never leak into the default lookup path.
 
 ## Dispatcher
 
