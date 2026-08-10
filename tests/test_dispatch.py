@@ -4,7 +4,7 @@ import importlib
 
 import httpx
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import CONNECTION_CLOSED, ErrorData
 
 from mnemos_bridge_core import ToolResult
@@ -23,7 +23,7 @@ async def test_dispatch_retries_retryable_mcp_errors(monkeypatch, error_code) ->
         async def call_tool(self, name, args):
             self.calls += 1
             if self.calls == 1:
-                raise McpError(ErrorData(code=error_code, message="transient MCP error"))
+                raise MCPError.from_error_data(ErrorData(code=error_code, message="transient MCP error"))
             return ToolResult(content=[])
 
     async def no_sleep(delay):
