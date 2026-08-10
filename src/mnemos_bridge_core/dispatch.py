@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import anyio
 import httpx
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
 
 from .client import McpClient
 from .types import ToolResult
@@ -10,6 +12,13 @@ from .types import ToolResult
 _TIMEOUT_ERRORS = tuple(error for error in (TimeoutError, getattr(anyio, "TimeoutError", None)) if error is not None)
 _TRANSIENT_ERRORS = (httpx.ConnectError, httpx.ReadError)
 _RETRYABLE_ERRORS = _TIMEOUT_ERRORS + _TRANSIENT_ERRORS
+_DISPATCH_ERRORS = _RETRYABLE_ERRORS + (McpError,)
+
+
+def _is_retryable(error: BaseException) -> bool:
+    if isinstance(error, _RETRYABLE_ERRORS):
+        return True
+    return isinstance(error, McpError) and error.error.code in (httpx.codes.REQUEST_TIMEOUT, CONNECTION_CLOSED)
 
 
 async def dispatch(client: McpClient, name: str, args: dict, *, retries: int = 2, timeout: float = 30) -> ToolResult:
@@ -18,7 +27,9 @@ async def dispatch(client: McpClient, name: str, args: dict, *, retries: int = 2
         try:
             with anyio.fail_after(timeout):
                 return await client.call_tool(name, args)
-        except _RETRYABLE_ERRORS:
+        except _DISPATCH_ERRORS as error:
+            if not _is_retryable(error):
+                raise
             if attempt >= max_retries:
                 raise
             await anyio.sleep(1)

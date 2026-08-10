@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import base64
 from typing import Any
 
-from .types import ToolResult
+from .types import ContentBlock, ToolResult
 
 
 class ResultRenderer:
@@ -15,9 +16,10 @@ class ResultRenderer:
         }
 
     @staticmethod
-    def to_gemini_part(r: ToolResult) -> dict[str, Any]:
+    def to_gemini_part(r: ToolResult, name: str) -> dict[str, Any]:
         return {
             "functionResponse": {
+                "name": name,
                 "response": {
                     "content": [block.text for block in r.content if block.text],
                 }
@@ -32,8 +34,23 @@ class ResultRenderer:
                 {
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
-                    "content": [block.model_dump(exclude_none=True) for block in r.content],
+                    "content": [ResultRenderer._to_anthropic_content(block) for block in r.content],
                     "is_error": r.is_error,
                 }
             ],
         }
+
+    @staticmethod
+    def _to_anthropic_content(block: ContentBlock) -> dict[str, Any]:
+        if block.type == "image":
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": block.mime_type,
+                    "data": base64.b64encode(block.data or b"").decode("ascii"),
+                },
+            }
+        if block.type == "resource_link":
+            return {"type": "text", "text": block.uri or ""}
+        return {"type": "text", "text": block.text or ""}

@@ -44,17 +44,25 @@ class McpClient:
 
     async def __aenter__(self) -> Self:
         self._exit_stack = AsyncExitStack()
-        headers = {"Authorization": f"Bearer {self.token}"}
-        read_stream, write_stream = await self._exit_stack.enter_async_context(
-            sse_client(self.url, headers=headers, timeout=self.timeout)
-        )
-        session = ClientSession(
-            read_stream,
-            write_stream,
-            read_timeout_seconds=timedelta(seconds=self.timeout),
-        )
-        self._session = await self._exit_stack.enter_async_context(session)
-        await self._session.initialize()
+        try:
+            headers = {"Authorization": f"Bearer {self.token}"}
+            read_stream, write_stream = await self._exit_stack.enter_async_context(
+                sse_client(self.url, headers=headers, timeout=self.timeout)
+            )
+            session = ClientSession(
+                read_stream,
+                write_stream,
+                read_timeout_seconds=timedelta(seconds=self.timeout),
+            )
+            self._session = await self._exit_stack.enter_async_context(session)
+            await self._session.initialize()
+        except BaseException:
+            try:
+                await self._exit_stack.aclose()
+            finally:
+                self._session = None
+                self._exit_stack = None
+            raise
         return self
 
     async def __aexit__(
@@ -70,14 +78,21 @@ class McpClient:
 
     async def list_tools(self) -> list[ToolSchema]:
         session = self._require_session()
-        result = await session.list_tools()
+        tools = []
+        cursor = None
+        while True:
+            result = await session.list_tools(cursor=cursor)
+            tools.extend(result.tools)
+            cursor = result.nextCursor
+            if cursor is None:
+                break
         return [
             ToolSchema(
                 name=tool.name,
                 description=tool.description or "",
                 input_schema=getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None) or {},
             )
-            for tool in result.tools
+            for tool in tools
         ]
 
     async def call_tool(self, name: str, args: dict) -> ToolResult:
