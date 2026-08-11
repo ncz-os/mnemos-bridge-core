@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import asyncio
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from importlib.metadata import version
@@ -12,6 +13,7 @@ from typing import Any, Self
 
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
+
 try:
     from mcp.types import PaginatedRequestParams
 except ImportError:  # MCP 1.x accepts the cursor directly
@@ -25,6 +27,7 @@ def _mcp_uses_float_timeout(mcp_version: str) -> bool:
 
 
 _MCP_USES_PARAMS_PAGINATION = "params" in inspect.signature(ClientSession.list_tools).parameters
+_MCP_USES_CURSOR_PAGINATION = "cursor" in inspect.signature(ClientSession.list_tools).parameters
 _MCP_USES_FLOAT_TIMEOUT = _mcp_uses_float_timeout(version("mcp"))
 
 
@@ -35,6 +38,8 @@ class McpClient:
         self.timeout = timeout
         self._exit_stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
+        self._owner_task: asyncio.Task[None] | None = None
+        self._owner_close: asyncio.Event | None = None
 
     @classmethod
     def from_url(cls, url: str, *, token: str, timeout: float = 30) -> Self:
@@ -49,8 +54,39 @@ class McpClient:
         ``await client.__aexit__(None, None, None)``) on shutdown.
         """
         client = cls.from_url(url, token=token, timeout=timeout)
-        await client.__aenter__()
+        started = asyncio.get_running_loop().create_future()
+        client._owner_close = asyncio.Event()
+        client._owner_task = asyncio.create_task(client._own_lifecycle(started))
+        try:
+            await started
+        except BaseException:
+            owner_task = client._owner_task
+            if owner_task is not None and not owner_task.done():
+                owner_task.cancel()
+                try:
+                    await owner_task
+                except asyncio.CancelledError:
+                    pass
+            client._owner_task = None
+            client._owner_close = None
+            raise
         return client
+
+    async def _own_lifecycle(self, started: asyncio.Future[None]) -> None:
+        """Enter and exit task-affine MCP contexts from one owner task."""
+        try:
+            await self.__aenter__()
+        except BaseException as error:
+            if not started.done():
+                started.set_exception(error)
+            return
+        if started.cancelled():
+            await self._close_stack()
+            return
+        started.set_result(None)
+        assert self._owner_close is not None
+        await self._owner_close.wait()
+        await self._close_stack()
 
     async def aclose(self) -> None:
         """Close the SSE session if open. Mirrors __aexit__ but takes no
@@ -67,9 +103,7 @@ class McpClient:
             session = ClientSession(
                 read_stream,
                 write_stream,
-                read_timeout_seconds=(
-                    self.timeout if _MCP_USES_FLOAT_TIMEOUT else timedelta(seconds=self.timeout)
-                ),
+                read_timeout_seconds=(self.timeout if _MCP_USES_FLOAT_TIMEOUT else timedelta(seconds=self.timeout)),
             )
             self._session = await self._exit_stack.enter_async_context(session)
             await self._session.initialize()
@@ -88,6 +122,17 @@ class McpClient:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        owner_task = self._owner_task
+        if owner_task is not None and asyncio.current_task() is not owner_task:
+            assert self._owner_close is not None
+            self._owner_close.set()
+            await owner_task
+            self._owner_task = None
+            self._owner_close = None
+            return
+        await self._close_stack()
+
+    async def _close_stack(self) -> None:
         if self._exit_stack is not None:
             await self._exit_stack.aclose()
         self._session = None
@@ -102,8 +147,10 @@ class McpClient:
                 assert PaginatedRequestParams is not None
                 params = PaginatedRequestParams(cursor=cursor) if cursor is not None else None
                 result = await session.list_tools(params=params)
-            else:
+            elif _MCP_USES_CURSOR_PAGINATION:
                 result = await session.list_tools(cursor=cursor)
+            else:
+                result = await session.list_tools()
             tools.extend(result.tools)
             cursor = getattr(result, "next_cursor", None)
             if cursor is None:
@@ -122,11 +169,21 @@ class McpClient:
     async def call_tool(self, name: str, args: dict) -> ToolResult:
         session = self._require_session()
         result = await session.call_tool(name, arguments=args)
-        content = [block for item in result.content if (block := self._map_content(item)) is not None]
+        content = []
+        unsupported = []
+        for item in result.content:
+            block = self._map_content(item)
+            if block is None:
+                unsupported.append(str(getattr(item, "type", type(item).__name__)))
+            else:
+                content.append(block)
+        if unsupported:
+            content.append(ContentBlock(type="text", text=f"Unsupported MCP content type(s): {', '.join(unsupported)}"))
         return ToolResult(
             content=content,
             is_error=(
                 bool(getattr(result, "is_error", getattr(result, "isError", False)))
+                or bool(unsupported)
                 or _content_reports_error(content)
             ),
         )
@@ -150,6 +207,15 @@ class McpClient:
         if item_type == "resource_link":
             uri = getattr(item, "uri", None)
             return ContentBlock(type="resource_link", uri=str(uri) if uri is not None else None)
+        if item_type == "resource":
+            resource = getattr(item, "resource", None)
+            text = getattr(resource, "text", None)
+            if text is not None:
+                return ContentBlock(type="text", text=text)
+            blob = getattr(resource, "blob", None)
+            mime_type = getattr(resource, "mimeType", None) or getattr(resource, "mime_type", None)
+            if blob is not None and mime_type and mime_type.startswith("image/"):
+                return ContentBlock(type="image", data=_decode_image_data(blob), mime_type=mime_type)
         return None
 
 

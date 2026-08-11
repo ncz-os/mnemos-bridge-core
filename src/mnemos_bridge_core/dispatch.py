@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import anyio
 import httpx
+
 try:
     from mcp.shared.exceptions import MCPError
 except ImportError:  # mcp releases before the exception was capitalized
     from mcp.shared.exceptions import McpError as MCPError
-from mcp.types import CONNECTION_CLOSED
+try:
+    from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
+except ImportError:  # MCP 1.0 does not export the JSON-RPC transport error constants
+    CONNECTION_CLOSED = -32000
+    REQUEST_TIMEOUT = -32001
 
 from .client import McpClient
 from .types import ToolResult
@@ -21,7 +26,7 @@ _DISPATCH_ERRORS = _RETRYABLE_ERRORS + (MCPError,)
 def _is_retryable(error: BaseException) -> bool:
     if isinstance(error, _RETRYABLE_ERRORS):
         return True
-    return isinstance(error, MCPError) and error.error.code in (httpx.codes.REQUEST_TIMEOUT, CONNECTION_CLOSED)
+    return isinstance(error, MCPError) and error.error.code in (REQUEST_TIMEOUT, CONNECTION_CLOSED)
 
 
 async def dispatch(

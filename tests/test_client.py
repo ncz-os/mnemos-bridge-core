@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import timedelta
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import create_autospec
 
 import pytest
 from mcp.client.session import ClientSession
-from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
+from mcp.types import (
+    CallToolResult,
+    ListToolsResult,
+    TextContent,
+    Tool,
+)
 
 import mnemos_bridge_core.client as client_module
 from mnemos_bridge_core import McpClient
@@ -109,6 +115,7 @@ async def test_list_tools_supports_mcp_1_cursor_contract(monkeypatch) -> None:
             )
 
     monkeypatch.setattr(client_module, "_MCP_USES_PARAMS_PAGINATION", False)
+    monkeypatch.setattr(client_module, "_MCP_USES_CURSOR_PAGINATION", True)
     session = FakeSession()
     client = McpClient.from_url("https://example.com/sse", token="token")
     client._session = session
@@ -117,6 +124,65 @@ async def test_list_tools_supports_mcp_1_cursor_contract(monkeypatch) -> None:
 
     assert [tool.name for tool in tools] == ["tool"]
     assert session.cursors == [None]
+
+
+async def test_list_tools_supports_mcp_1_0_zero_argument_contract(monkeypatch) -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_tools(self):
+            self.calls += 1
+            return SimpleNamespace(
+                tools=[SimpleNamespace(name="tool", description=None, inputSchema={})],
+                nextCursor=None,
+            )
+
+    monkeypatch.setattr(client_module, "_MCP_USES_PARAMS_PAGINATION", False)
+    monkeypatch.setattr(client_module, "_MCP_USES_CURSOR_PAGINATION", False)
+    session = FakeSession()
+    client = McpClient.from_url("https://example.com/sse", token="token")
+    client._session = session
+
+    tools = await client.list_tools()
+
+    assert [tool.name for tool in tools] == ["tool"]
+    assert session.calls == 1
+
+
+async def test_open_from_url_closes_task_affine_transport_from_another_task(monkeypatch) -> None:
+    entered_in = None
+    exited_in = None
+
+    @asynccontextmanager
+    async def fake_sse_client(*args, **kwargs):
+        nonlocal entered_in, exited_in
+        entered_in = asyncio.current_task()
+        try:
+            yield object(), object()
+        finally:
+            exited_in = asyncio.current_task()
+            if exited_in is not entered_in:
+                raise RuntimeError("transport exited from a different task")
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def initialize(self):
+            return None
+
+    monkeypatch.setattr(client_module, "sse_client", fake_sse_client)
+    monkeypatch.setattr(client_module, "ClientSession", lambda *args, **kwargs: FakeSession())
+
+    client = await McpClient.open_from_url("https://example.com/sse", token="token")
+    await asyncio.create_task(client.aclose())
+
+    assert exited_in is entered_in
+    assert client._session is None
 
 
 async def test_call_tool_preserves_sdk_error_flag() -> None:
@@ -173,3 +239,44 @@ async def test_call_tool_does_not_misclassify_successful_content(payload) -> Non
     result = await client.call_tool("search_memories", {})
 
     assert result.is_error is False
+
+
+async def test_call_tool_normalizes_embedded_text_and_image_resources() -> None:
+    session = create_autospec(ClientSession, instance=True)
+    session.call_tool.return_value = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="resource",
+                resource=SimpleNamespace(uri="memory://one", text="embedded memory"),
+            ),
+            SimpleNamespace(
+                type="resource",
+                resource=SimpleNamespace(uri="memory://image", mimeType="image/png", blob="aW1hZ2U="),
+            ),
+        ],
+        isError=False,
+    )
+    client = McpClient.from_url("https://example.com/sse", token="token")
+    client._session = session
+
+    result = await client.call_tool("read_resource", {})
+
+    assert result.is_error is False
+    assert result.content[0].text == "embedded memory"
+    assert result.content[1].data == b"image"
+    assert result.content[1].mime_type == "image/png"
+
+
+async def test_call_tool_fails_closed_for_unrepresentable_supported_content() -> None:
+    session = create_autospec(ClientSession, instance=True)
+    session.call_tool.return_value = SimpleNamespace(
+        content=[SimpleNamespace(type="audio", data="YXVkaW8=", mimeType="audio/wav")],
+        isError=False,
+    )
+    client = McpClient.from_url("https://example.com/sse", token="token")
+    client._session = session
+
+    result = await client.call_tool("read_audio", {})
+
+    assert result.is_error is True
+    assert result.content == [client_module.ContentBlock(type="text", text="Unsupported MCP content type(s): audio")]
