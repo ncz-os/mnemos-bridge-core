@@ -40,7 +40,7 @@ from mnemos_bridge_core import AuthResolver, McpClient
 
 
 async def main() -> None:
-    token = AuthResolver.resolve()
+    token = AuthResolver.resolve_mcp_token()
     async with McpClient.from_url("https://mnemos.example.com/sse", token=token) as client:
         tools = await client.list_tools()
         result = await client.call_tool("search_memories", {"query": "routing notes", "limit": 5})
@@ -55,11 +55,15 @@ anyio.run(main)
 ```python
 from mnemos_bridge_core import AuthResolver
 
-token = AuthResolver.resolve()
-explicit = AuthResolver.resolve(api_key="mnemos_sk_test")
+mcp_token = AuthResolver.resolve_mcp_token()
+api_key = AuthResolver.resolve()
+explicit_api_key = AuthResolver.resolve(api_key="mnemos_sk_test")
 ```
 
-Lookup order is explicit argument, `MNEMOS_API_KEY`, `~/.mnemos/config.toml`, then
+`resolve_mcp_token()` looks up an explicit token and then `MNEMOS_MCP_TOKEN`.
+For a per-user `MNEMOS_MCP_TOKENS` mapping, pass the selected MCP token explicitly.
+`resolve()` remains the backend API-key resolver; its lookup order is explicit
+argument, `MNEMOS_API_KEY`, `~/.mnemos/config.toml`, then
 `~/.api_keys_master.json` at `mnemos.bridge.api_key`.
 
 ## Dispatcher
@@ -67,7 +71,14 @@ Lookup order is explicit argument, `MNEMOS_API_KEY`, `~/.mnemos/config.toml`, th
 ```python
 from mnemos_bridge_core import dispatch
 
-result = await dispatch(client, "search_memories", {"query": "forecasting"}, retries=2, timeout=30)
+result = await dispatch(
+    client,
+    "search_memories",
+    {"query": "forecasting"},
+    retries=2,
+    timeout=30,
+    idempotent=True,
+)
 ```
 
 

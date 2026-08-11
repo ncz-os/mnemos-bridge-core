@@ -4,13 +4,21 @@ import base64
 import binascii
 from contextlib import AsyncExitStack
 from datetime import timedelta
+import inspect
 from types import TracebackType
 from typing import Any, Self
 
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
+try:
+    from mcp.types import PaginatedRequestParams
+except ImportError:  # MCP 1.x accepts the cursor directly
+    PaginatedRequestParams = None  # type: ignore[assignment,misc]
 
 from .types import ContentBlock, ToolResult, ToolSchema
+
+
+_MCP_USES_PARAMS_PAGINATION = "params" in inspect.signature(ClientSession.list_tools).parameters
 
 
 class McpClient:
@@ -52,7 +60,9 @@ class McpClient:
             session = ClientSession(
                 read_stream,
                 write_stream,
-                read_timeout_seconds=timedelta(seconds=self.timeout),
+                read_timeout_seconds=(
+                    self.timeout if _MCP_USES_PARAMS_PAGINATION else timedelta(seconds=self.timeout)
+                ),
             )
             self._session = await self._exit_stack.enter_async_context(session)
             await self._session.initialize()
@@ -81,9 +91,16 @@ class McpClient:
         tools = []
         cursor = None
         while True:
-            result = await session.list_tools(cursor=cursor)
+            if _MCP_USES_PARAMS_PAGINATION:
+                assert PaginatedRequestParams is not None
+                params = PaginatedRequestParams(cursor=cursor) if cursor is not None else None
+                result = await session.list_tools(params=params)
+            else:
+                result = await session.list_tools(cursor=cursor)
             tools.extend(result.tools)
-            cursor = result.nextCursor
+            cursor = getattr(result, "next_cursor", None)
+            if cursor is None:
+                cursor = getattr(result, "nextCursor", None)
             if cursor is None:
                 break
         return [
@@ -100,7 +117,7 @@ class McpClient:
         result = await session.call_tool(name, arguments=args)
         return ToolResult(
             content=[block for item in result.content if (block := self._map_content(item)) is not None],
-            is_error=bool(getattr(result, "isError", False)),
+            is_error=bool(getattr(result, "is_error", getattr(result, "isError", False))),
         )
 
     def _require_session(self) -> ClientSession:

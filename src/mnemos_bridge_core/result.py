@@ -16,15 +16,15 @@ class ResultRenderer:
         }
 
     @staticmethod
-    def to_gemini_part(r: ToolResult, name: str) -> dict[str, Any]:
-        return {
-            "functionResponse": {
-                "name": name,
-                "response": {
-                    "content": [block.text for block in r.content if block.text],
-                }
+    def to_gemini_part(r: ToolResult, name: str | None = None) -> dict[str, Any]:
+        function_response: dict[str, Any] = {
+            "response": {
+                "content": [block.text for block in r.content if block.text],
             }
         }
+        if name is not None:
+            function_response["name"] = name
+        return {"functionResponse": function_response}
 
     @staticmethod
     def to_anthropic_message(r: ToolResult, tool_use_id: str) -> dict[str, Any]:

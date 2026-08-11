@@ -58,3 +58,21 @@ def test_raises_if_nothing_found(monkeypatch, tmp_path) -> None:
 
     with pytest.raises(ValueError, match="MNEMOS API key not found"):
         AuthResolver.resolve()
+
+
+def test_mcp_token_resolver_uses_distinct_token(monkeypatch) -> None:
+    monkeypatch.setenv("MNEMOS_MCP_TOKEN", "mcp-secret")
+    monkeypatch.setenv("MNEMOS_API_KEY", "backend-api-key")
+
+    assert AuthResolver.resolve_mcp_token() == "mcp-secret"
+    assert AuthResolver.resolve() == "backend-api-key"
+
+
+def test_mcp_token_resolver_requires_explicit_mapping_token(monkeypatch) -> None:
+    monkeypatch.delenv("MNEMOS_MCP_TOKEN", raising=False)
+    monkeypatch.setenv("MNEMOS_MCP_TOKENS", "alice:mcp-secret:backend-api-key")
+
+    with pytest.raises(ValueError, match="pass the selected user's MCP token explicitly"):
+        AuthResolver.resolve_mcp_token()
+
+    assert AuthResolver.resolve_mcp_token("mcp-secret") == "mcp-secret"

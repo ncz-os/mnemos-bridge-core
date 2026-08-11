@@ -10,6 +10,21 @@ import tomllib
 
 class AuthResolver:
     @staticmethod
+    def resolve_mcp_token(token: str | None = None) -> str:
+        """Resolve the bearer token accepted by the MNEMOS MCP edge."""
+        if token:
+            return token
+
+        env_token = os.environ.get("MNEMOS_MCP_TOKEN")
+        if env_token:
+            return env_token
+
+        raise ValueError(
+            "MNEMOS MCP token not found. Provide token or set MNEMOS_MCP_TOKEN. "
+            "For MNEMOS_MCP_TOKENS mappings, pass the selected user's MCP token explicitly."
+        )
+
+    @staticmethod
     def resolve(api_key: str | None = None) -> str:
         if api_key:
             return api_key

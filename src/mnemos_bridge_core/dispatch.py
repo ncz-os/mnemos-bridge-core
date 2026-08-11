@@ -24,8 +24,21 @@ def _is_retryable(error: BaseException) -> bool:
     return isinstance(error, MCPError) and error.error.code in (httpx.codes.REQUEST_TIMEOUT, CONNECTION_CLOSED)
 
 
-async def dispatch(client: McpClient, name: str, args: dict, *, retries: int = 2, timeout: float = 30) -> ToolResult:
-    max_retries = max(0, retries)
+async def dispatch(
+    client: McpClient,
+    name: str,
+    args: dict,
+    *,
+    retries: int = 2,
+    timeout: float = 30,
+    idempotent: bool = False,
+) -> ToolResult:
+    """Call a tool, retrying transient failures only when explicitly safe.
+
+    MCP request IDs do not make tool mutations idempotent. Callers must opt in
+    only for tools whose contract is read-only or otherwise idempotent.
+    """
+    max_retries = max(0, retries) if idempotent else 0
     for attempt in range(max_retries + 1):
         try:
             with anyio.fail_after(timeout):
@@ -50,9 +63,10 @@ class Dispatcher:
     knobs every time.
     """
 
-    def __init__(self, *, retries: int = 2, timeout: float = 30) -> None:
+    def __init__(self, *, retries: int = 2, timeout: float = 30, idempotent: bool = False) -> None:
         self._retries = retries
         self._timeout = timeout
+        self._idempotent = idempotent
 
     async def dispatch(
         self,
@@ -62,6 +76,7 @@ class Dispatcher:
         *,
         retries: int | None = None,
         timeout: float | None = None,
+        idempotent: bool | None = None,
     ) -> ToolResult:
         return await dispatch(
             client,
@@ -69,4 +84,5 @@ class Dispatcher:
             args,
             retries=self._retries if retries is None else retries,
             timeout=self._timeout if timeout is None else timeout,
+            idempotent=self._idempotent if idempotent is None else idempotent,
         )

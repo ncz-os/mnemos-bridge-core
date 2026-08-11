@@ -61,3 +61,11 @@ def test_anthropic_renders_provider_specific_image_and_resource_blocks() -> None
         },
         {"type": "text", "text": "https://example.com/resource"},
     ]
+
+
+def test_gemini_renderer_preserves_one_argument_api() -> None:
+    result = ToolResult(content=[ContentBlock(type="text", text="ok")])
+
+    assert ResultRenderer.to_gemini_part(result) == {
+        "functionResponse": {"response": {"content": ["ok"]}}
+    }
