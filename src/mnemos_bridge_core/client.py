@@ -4,7 +4,9 @@ import base64
 import binascii
 from contextlib import AsyncExitStack
 from datetime import timedelta
+from importlib.metadata import version
 import inspect
+import json
 from types import TracebackType
 from typing import Any, Self
 
@@ -18,7 +20,12 @@ except ImportError:  # MCP 1.x accepts the cursor directly
 from .types import ContentBlock, ToolResult, ToolSchema
 
 
+def _mcp_uses_float_timeout(mcp_version: str) -> bool:
+    return int(mcp_version.split(".", 1)[0]) >= 2
+
+
 _MCP_USES_PARAMS_PAGINATION = "params" in inspect.signature(ClientSession.list_tools).parameters
+_MCP_USES_FLOAT_TIMEOUT = _mcp_uses_float_timeout(version("mcp"))
 
 
 class McpClient:
@@ -61,7 +68,7 @@ class McpClient:
                 read_stream,
                 write_stream,
                 read_timeout_seconds=(
-                    self.timeout if _MCP_USES_PARAMS_PAGINATION else timedelta(seconds=self.timeout)
+                    self.timeout if _MCP_USES_FLOAT_TIMEOUT else timedelta(seconds=self.timeout)
                 ),
             )
             self._session = await self._exit_stack.enter_async_context(session)
@@ -115,9 +122,13 @@ class McpClient:
     async def call_tool(self, name: str, args: dict) -> ToolResult:
         session = self._require_session()
         result = await session.call_tool(name, arguments=args)
+        content = [block for item in result.content if (block := self._map_content(item)) is not None]
         return ToolResult(
-            content=[block for item in result.content if (block := self._map_content(item)) is not None],
-            is_error=bool(getattr(result, "is_error", getattr(result, "isError", False))),
+            content=content,
+            is_error=(
+                bool(getattr(result, "is_error", getattr(result, "isError", False)))
+                or _content_reports_error(content)
+            ),
         )
 
     def _require_session(self) -> ClientSession:
@@ -151,3 +162,17 @@ def _decode_image_data(data: Any) -> bytes:
         except (binascii.Error, ValueError):
             return data.encode("utf-8")
     return bytes(data)
+
+
+def _content_reports_error(content: list[ContentBlock]) -> bool:
+    """Recognize the JSON failure envelopes returned by MNEMOS MCP servers."""
+    for block in content:
+        if block.type != "text" or block.text is None:
+            continue
+        try:
+            payload = json.loads(block.text)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(payload, dict) and (payload.get("success") is False or "error" in payload):
+            return True
+    return False

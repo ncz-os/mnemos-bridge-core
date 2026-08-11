@@ -4,7 +4,10 @@ import importlib
 
 import httpx
 import pytest
-from mcp.shared.exceptions import MCPError
+try:
+    from mcp.shared.exceptions import MCPError
+except ImportError:  # MCP 1.x spelling
+    from mcp.shared.exceptions import McpError as MCPError
 from mcp.types import CONNECTION_CLOSED, ErrorData
 
 from mnemos_bridge_core import ToolResult

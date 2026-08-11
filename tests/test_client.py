@@ -14,11 +14,23 @@ from mnemos_bridge_core import McpClient
 
 
 @pytest.mark.parametrize(
-    ("uses_params_pagination", "expected_timeout"),
-    [(True, 30), (False, timedelta(seconds=30))],
+    ("mcp_version", "expected"),
+    [("1.0.0", False), ("1.26.0", False), ("2.0.0", True)],
+)
+def test_timeout_type_follows_mcp_major_version(mcp_version, expected) -> None:
+    assert client_module._mcp_uses_float_timeout(mcp_version) is expected
+
+
+@pytest.mark.parametrize(
+    ("uses_params_pagination", "uses_float_timeout", "expected_timeout"),
+    [
+        (True, False, timedelta(seconds=30)),  # MCP 1.26
+        (False, False, timedelta(seconds=30)),  # earlier MCP 1.x
+        (True, True, 30),  # MCP 2.x
+    ],
 )
 async def test_failed_initialization_closes_entered_contexts(
-    monkeypatch, uses_params_pagination, expected_timeout
+    monkeypatch, uses_params_pagination, uses_float_timeout, expected_timeout
 ) -> None:
     closed = []
     session_kwargs = {}
@@ -42,6 +54,8 @@ async def test_failed_initialization_closes_entered_contexts(
 
     monkeypatch.setattr(client_module, "sse_client", fake_sse_client)
     monkeypatch.setattr(client_module, "_MCP_USES_PARAMS_PAGINATION", uses_params_pagination)
+    monkeypatch.setattr(client_module, "_MCP_USES_FLOAT_TIMEOUT", uses_float_timeout)
+
     def fake_session(*args, **kwargs):
         session_kwargs.update(kwargs)
         return FakeSession()
@@ -117,3 +131,45 @@ async def test_call_tool_preserves_sdk_error_flag() -> None:
     result = await client.call_tool("create_memory", {})
 
     assert result.is_error is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"success": false, "error": "backend unavailable"}',
+        '{"error": "503 Service Unavailable", "detail": {"retry": true}}',
+    ],
+)
+async def test_call_tool_recognizes_mnemos_json_failure_envelopes(payload) -> None:
+    session = create_autospec(ClientSession, instance=True)
+    session.call_tool.return_value = CallToolResult(
+        content=[TextContent(type="text", text=payload)],
+        isError=False,
+    )
+    client = McpClient.from_url("https://example.com/sse", token="token")
+    client._session = session
+
+    result = await client.call_tool("create_memory", {})
+
+    assert result.is_error is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"success": true, "result": {"error": "historical value"}}',
+        "ordinary non-JSON tool output",
+    ],
+)
+async def test_call_tool_does_not_misclassify_successful_content(payload) -> None:
+    session = create_autospec(ClientSession, instance=True)
+    session.call_tool.return_value = CallToolResult(
+        content=[TextContent(type="text", text=payload)],
+        isError=False,
+    )
+    client = McpClient.from_url("https://example.com/sse", token="token")
+    client._session = session
+
+    result = await client.call_tool("search_memories", {})
+
+    assert result.is_error is False
