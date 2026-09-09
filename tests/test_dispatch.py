@@ -20,8 +20,13 @@ except ImportError:  # MCP 1.0 does not export these constants
 from mnemos_bridge_core import ToolResult
 from mnemos_bridge_core.dispatch import dispatch
 
-
 dispatch_module = importlib.import_module("mnemos_bridge_core.dispatch")
+
+
+def _make_mcp_error(error_code: int) -> MCPError:
+    error_data = ErrorData(code=error_code, message="transient MCP error")
+    factory = getattr(MCPError, "from_error_data", None)
+    return factory(error_data) if factory is not None else MCPError(error_data)
 
 
 async def test_dispatch_default_configuration_calls_once() -> None:
@@ -50,7 +55,7 @@ async def test_dispatch_retries_retryable_mcp_errors(monkeypatch, error_code) ->
         async def call_tool(self, name, args):
             self.calls += 1
             if self.calls == 1:
-                raise MCPError.from_error_data(ErrorData(code=error_code, message="transient MCP error"))
+                raise _make_mcp_error(error_code)
             return ToolResult(content=[])
 
     async def no_sleep(delay):
@@ -68,9 +73,7 @@ async def test_dispatch_retries_retryable_mcp_errors(monkeypatch, error_code) ->
 async def test_dispatch_does_not_confuse_http_408_with_mcp_timeout(monkeypatch) -> None:
     class FakeClient:
         async def call_tool(self, name, args):
-            raise MCPError.from_error_data(
-                ErrorData(code=httpx.codes.REQUEST_TIMEOUT, message="application-defined MCP error")
-            )
+            raise _make_mcp_error(httpx.codes.REQUEST_TIMEOUT)
 
     async def no_sleep(delay):
         pytest.fail("HTTP status 408 is not an MCP transport error code")
@@ -81,13 +84,15 @@ async def test_dispatch_does_not_confuse_http_408_with_mcp_timeout(monkeypatch) 
         await dispatch(FakeClient(), "search_memories", {}, retries=1, idempotent=True)
 
 
-async def test_dispatch_does_not_retry_unknown_or_mutating_tool(monkeypatch) -> None:
+async def test_dispatch_does_not_retry_non_idempotent_tool_after_partial_mutation(monkeypatch) -> None:
     class FakeClient:
         def __init__(self) -> None:
             self.calls = 0
+            self.committed_side_effects = 0
 
         async def call_tool(self, name, args):
             self.calls += 1
+            self.committed_side_effects += 1
             raise httpx.ReadError("response connection closed")
 
     async def no_sleep(delay):
@@ -100,3 +105,4 @@ async def test_dispatch_does_not_retry_unknown_or_mutating_tool(monkeypatch) -> 
         await dispatch(client, "create_memory", {}, retries=2)
 
     assert client.calls == 1
+    assert client.committed_side_effects == 1

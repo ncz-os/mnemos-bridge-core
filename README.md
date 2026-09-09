@@ -50,6 +50,14 @@ async def main() -> None:
 anyio.run(main)
 ```
 
+`McpClient` requires `https://` by default because it attaches a bearer token to
+the connection. Trusted LAN deployments that cannot provide TLS must opt in
+explicitly with `allow_insecure_transport=True`. Existing adapters that do not
+expose that keyword can instead set `MNEMOS_ALLOW_INSECURE_TRANSPORT=1`. This
+escape hatch is for trusted LAN use only; it must not be used across untrusted
+or public networks. Explicitly passing `allow_insecure_transport=False`
+overrides the environment variable.
+
 ## AuthResolver
 
 ```python

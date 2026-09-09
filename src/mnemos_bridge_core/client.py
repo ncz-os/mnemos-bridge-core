@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
-import asyncio
+import inspect
+import json
+import os
+import warnings
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from importlib.metadata import version
-import inspect
-import json
 from types import TracebackType
 from typing import Any, Self
+from urllib.parse import SplitResult, urlsplit
 
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
@@ -29,31 +32,115 @@ def _mcp_uses_float_timeout(mcp_version: str) -> bool:
 _MCP_USES_PARAMS_PAGINATION = "params" in inspect.signature(ClientSession.list_tools).parameters
 _MCP_USES_CURSOR_PAGINATION = "cursor" in inspect.signature(ClientSession.list_tools).parameters
 _MCP_USES_FLOAT_TIMEOUT = _mcp_uses_float_timeout(version("mcp"))
+_SUPPORTED_URL_SCHEMES = frozenset({"http", "https"})
+_INSECURE_TRANSPORT_ENV = "MNEMOS_ALLOW_INSECURE_TRANSPORT"
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _insecure_transport_enabled(allow_insecure_transport: bool | None) -> bool:
+    if allow_insecure_transport is not None:
+        return allow_insecure_transport
+    return os.environ.get(_INSECURE_TRANSPORT_ENV, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _safe_endpoint(parts: SplitResult) -> str:
+    """Render an endpoint without URL credentials, paths, queries, or fragments."""
+    host = parts.hostname or "<missing-host>"
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return f"{parts.scheme.lower()}://{host}{f':{port}' if port is not None else ''}"
+
+
+def _validate_url(url: str, *, allow_insecure_transport: bool) -> str:
+    """Validate an SSE URL before the bearer token can reach the transport."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        raise ValueError("McpClient URL is invalid") from None
+
+    scheme = parts.scheme.lower()
+    if scheme not in _SUPPORTED_URL_SCHEMES:
+        raise ValueError("McpClient URL must use https://, or http:// with the LAN-only insecure opt-in")
+    if not parts.hostname:
+        raise ValueError("McpClient URL must include a host")
+    if port is not None and not 0 < port <= 65535:
+        raise ValueError("McpClient URL port is out of range")
+    if scheme == "http":
+        if not allow_insecure_transport:
+            raise ValueError(
+                "Refusing to send the MNEMOS bearer token over plaintext http://. "
+                "Use https://, or explicitly enable the LAN-only insecure transport opt-in."
+            )
+        warnings.warn(
+            f"Sending the MNEMOS bearer token over plaintext HTTP to {_safe_endpoint(parts)}; "
+            "allow_insecure_transport is for trusted LAN deployments only.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return url
 
 
 class McpClient:
-    def __init__(self, url: str, *, token: str, timeout: float = 30) -> None:
-        self.url = url
+    def __init__(
+        self,
+        url: str,
+        *,
+        token: str,
+        timeout: float = 30,
+        allow_insecure_transport: bool | None = None,
+    ) -> None:
+        insecure_transport_enabled = _insecure_transport_enabled(allow_insecure_transport)
+        self.url = _validate_url(url, allow_insecure_transport=insecure_transport_enabled)
         self.token = token
         self.timeout = timeout
+        self.allow_insecure_transport = insecure_transport_enabled
         self._exit_stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
         self._owner_task: asyncio.Task[None] | None = None
         self._owner_close: asyncio.Event | None = None
 
     @classmethod
-    def from_url(cls, url: str, *, token: str, timeout: float = 30) -> Self:
-        return cls(url, token=token, timeout=timeout)
+    def from_url(
+        cls,
+        url: str,
+        *,
+        token: str,
+        timeout: float = 30,
+        allow_insecure_transport: bool | None = None,
+    ) -> Self:
+        if allow_insecure_transport is None:
+            return cls(url, token=token, timeout=timeout)
+        return cls(url, token=token, timeout=timeout, allow_insecure_transport=allow_insecure_transport)
 
     @classmethod
-    async def open_from_url(cls, url: str, *, token: str, timeout: float = 30) -> Self:
+    async def open_from_url(
+        cls,
+        url: str,
+        *,
+        token: str,
+        timeout: float = 30,
+        allow_insecure_transport: bool | None = None,
+    ) -> Self:
         """Construct + open the SSE session in one call. Equivalent to
         ``client = McpClient.from_url(...); await client.__aenter__()``.
         Adapters that don't want to wrap every call site in ``async with``
         should use this and pair it with ``await client.aclose()`` (or
         ``await client.__aexit__(None, None, None)``) on shutdown.
         """
-        client = cls.from_url(url, token=token, timeout=timeout)
+        if allow_insecure_transport is None:
+            client = cls.from_url(url, token=token, timeout=timeout)
+        else:
+            client = cls.from_url(
+                url,
+                token=token,
+                timeout=timeout,
+                allow_insecure_transport=allow_insecure_transport,
+            )
         started = asyncio.get_running_loop().create_future()
         client._owner_close = asyncio.Event()
         client._owner_task = asyncio.create_task(client._own_lifecycle(started))
