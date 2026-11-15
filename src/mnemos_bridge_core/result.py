@@ -8,20 +8,32 @@ from .types import ContentBlock, ToolResult
 
 class ResultRenderer:
     @staticmethod
+    def _to_text_block(block: ContentBlock) -> str:
+        if block.type == "resource_link":
+            return block.uri or ""
+        if block.type == "image":
+            return f"[image: {block.mime_type}]" if block.mime_type else "[image]"
+        return block.text or ""
+
+    @staticmethod
     def to_openai_message(r: ToolResult, tool_call_id: str) -> dict[str, Any]:
+        content = " ".join(part for part in (ResultRenderer._to_text_block(block) for block in r.content) if part)
+        if r.is_error:
+            content = f"Error: {content}" if content else "Error:"
         return {
             "role": "tool",
             "tool_call_id": tool_call_id,
-            "content": " ".join(block.text for block in r.content if block.text),
+            "content": content,
         }
 
     @staticmethod
     def to_gemini_part(r: ToolResult, name: str | None = None) -> dict[str, Any]:
-        function_response: dict[str, Any] = {
-            "response": {
-                "content": [block.text for block in r.content if block.text],
-            }
+        response: dict[str, Any] = {
+            "content": [part for part in (ResultRenderer._to_text_block(block) for block in r.content) if part],
         }
+        if r.is_error:
+            response["is_error"] = True
+        function_response: dict[str, Any] = {"response": response}
         if name is not None:
             function_response["name"] = name
         return {"functionResponse": function_response}
